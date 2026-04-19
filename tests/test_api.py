@@ -331,6 +331,47 @@ class TestHealth:
         r = authed_client.get("/api/v1/health")
         assert r.status_code == 200
 
+    def test_status_attempts_plaud_recovery(self, client):
+        with patch("src.plaud_oauth.PlaudOAuthClient") as MockPlaud:
+            instance = MockPlaud.return_value
+            instance.token_status = {
+                "is_authenticated": True,
+                "has_access_token": True,
+                "has_refresh_token": True,
+                "token_valid": True,
+                "expires_at": "2026-12-31T00:00:00",
+                "expires_in_minutes": 60,
+                "needs_refresh": False,
+            }
+
+            r = client.get("/api/v1/status")
+            assert r.status_code == 200
+            data = r.json()
+            assert data["plaud"]["is_authenticated"] is True
+            assert data["plaud"]["recovery_attempted"] is True
+            instance.ensure_valid_token.assert_called_once()
+
+    def test_status_reports_plaud_recovery_failure(self, client):
+        with patch("src.plaud_oauth.PlaudOAuthClient") as MockPlaud:
+            instance = MockPlaud.return_value
+            instance.token_status = {
+                "is_authenticated": False,
+                "has_access_token": True,
+                "has_refresh_token": True,
+                "token_valid": False,
+                "expires_at": "2026-12-31T00:00:00",
+                "expires_in_minutes": -5,
+                "needs_refresh": True,
+            }
+            instance.ensure_valid_token.side_effect = Exception("refresh failed")
+
+            r = client.get("/api/v1/status")
+            assert r.status_code == 200
+            data = r.json()
+            assert data["plaud"]["is_authenticated"] is False
+            assert data["plaud"]["recovery_attempted"] is True
+            assert data["plaud"]["recovery_error"] == "refresh failed"
+
 
 # ═══════════════════════════════════════════════════════════
 # AUTH (test auth enforcement)
@@ -849,6 +890,19 @@ class TestAuthEndpoints:
             assert "auth_url" in data
             assert data["state"] == "state123"
 
+    def test_plaud_authorize_mobile_uses_api_callback(self, client, monkeypatch):
+        monkeypatch.delenv("PLAUD_API_REDIRECT_URI", raising=False)
+        with patch("src.plaud_oauth.PlaudOAuthClient") as MockPlaud:
+            MockPlaud.return_value.get_authorization_url.return_value = (
+                "https://example.com/auth",
+                "state123",
+            )
+            r = client.get("/api/v1/auth/plaud/authorize?mobile=true")
+            assert r.status_code == 200
+            MockPlaud.assert_called_once_with(
+                redirect_uri="http://testserver/api/v1/auth/plaud/callback"
+            )
+
     def test_plaud_token_exchange(self, client):
         with patch("src.plaud_oauth.PlaudOAuthClient") as MockPlaud:
             MockPlaud.return_value.token_status = {
@@ -871,6 +925,43 @@ class TestAuthEndpoints:
                 json={"code": "bad", "state": "state"},
             )
             assert r.status_code == 400
+
+    def test_plaud_callback_mobile_redirects_to_app(self, client):
+        with patch("src.plaud_oauth.PlaudOAuthClient") as MockPlaud:
+            MockPlaud.return_value.get_authorization_url.return_value = (
+                "https://example.com/auth",
+                "state123",
+            )
+            r = client.get("/api/v1/auth/plaud/authorize?mobile=true")
+            assert r.status_code == 200
+
+            r = client.get(
+                "/api/v1/auth/plaud/callback?code=authcode123&state=state123",
+                follow_redirects=False,
+            )
+            assert r.status_code in (302, 307)
+            assert r.headers["location"] == "plaudblender://plaud-callback?success=true"
+
+    def test_plaud_callback_web_redirects_back_to_browser(self, client):
+        with patch("src.plaud_oauth.PlaudOAuthClient") as MockPlaud:
+            MockPlaud.return_value.get_authorization_url.return_value = (
+                "https://example.com/auth",
+                "state123",
+            )
+            r = client.get(
+                "/api/v1/auth/plaud/authorize?return_to=http://localhost:8050/settings"
+            )
+            assert r.status_code == 200
+
+            r = client.get(
+                "/api/v1/auth/plaud/callback?code=authcode123&state=state123",
+                follow_redirects=False,
+            )
+            assert r.status_code in (302, 307)
+            assert (
+                r.headers["location"]
+                == "http://localhost:8050/settings?plaud_connected=1"
+            )
 
     def test_plaud_refresh(self, client):
         with patch("src.plaud_oauth.PlaudOAuthClient") as MockPlaud:
