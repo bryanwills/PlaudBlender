@@ -6,6 +6,7 @@ Tests every route for success, 404, 401, and invalid input paths.
 """
 
 import os
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -677,6 +678,18 @@ class TestSync:
             data = r.json()
             assert data["status"] == "started"
             mock_popen.assert_called_once()
+
+    def test_run_pipeline_when_already_running(self, client):
+        running = {"status": "running", "started_at": time.time()}
+        with (
+            patch("api.routes.sync.read_progress", return_value=running),
+            patch("subprocess.Popen") as mock_popen,
+        ):
+            r = client.post("/api/v1/sync/run", json={"stage": "full"})
+            assert r.status_code == 200
+            data = r.json()
+            assert data["status"] == "already_running"
+            mock_popen.assert_not_called()
 
     def test_run_pipeline_invalid_stage(self, client):
         r = client.post("/api/v1/sync/run", json={"stage": "invalid"})

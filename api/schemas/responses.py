@@ -191,6 +191,7 @@ class StatsOut(BaseModel):
 
 class PipelineRunRequest(BaseModel):
     stage: str = "full"  # full|ingest|process|index|graph
+    days_back: int = Field(default=7, ge=1, le=365)
 
 
 class PipelineRunResponse(BaseModel):
