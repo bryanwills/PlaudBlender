@@ -391,6 +391,19 @@ class NotionDatabaseSelectRequest(BaseModel):
 class NotionImportRequest(BaseModel):
     process: bool = True
     index: bool = True
+    batch_size: int = 0
+    force: bool = False
+
+
+class NotionMatchOverrideRequest(BaseModel):
+    page_id: str
+    recording_id: Optional[str] = None
+    clear: bool = False
+
+
+class NotionBulkMatchOverrideRequest(BaseModel):
+    overrides: List[NotionMatchOverrideRequest]
+    stop_on_error: bool = False
 
 
 class NotionRecordingOut(BaseModel):
