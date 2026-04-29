@@ -87,6 +87,8 @@ class DaySummaryOut(BaseModel):
     total_duration_seconds: float = 0
     recording_count: int = 0
     event_count: int = 0
+    coverage_status: Optional[str] = None
+    coverage_note: Optional[str] = None
     top_category: Optional[str] = None
     category_percentages: Optional[Dict[str, float]] = None
     top_keywords: Optional[List[str]] = None

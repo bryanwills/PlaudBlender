@@ -607,6 +607,9 @@ def _day_mood_summary(recordings: list) -> str:
 
 def create_day_card(day: DaySummary, expanded: bool = False) -> html.Div:
     """Create a rich card for a day with flow narrative, mood, and collapsible recordings."""
+    coverage_note = getattr(day, "coverage_note", None)
+    coverage_status = getattr(day, "coverage_status", None)
+
     # Build a quick day summary line from top categories + time span
     if day.recordings:
         first = min(r.start_time for r in day.recordings)
@@ -663,6 +666,20 @@ def create_day_card(day: DaySummary, expanded: bool = False) -> html.Div:
                 children=[
                     html.Span("✨ ", className="ai-summary-icon"),
                     html.Span(ai_summary_line, className="day-ai-summary-text"),
+                ],
+            )
+        )
+
+    if coverage_note and not day.recordings:
+        note_color = "#f59e0b" if coverage_status == "suspected_gap" else "#94a3b8"
+        note_icon = "⚠️" if coverage_status == "suspected_gap" else "✓"
+        header_info_children.append(
+            html.Div(
+                className="day-coverage-note-line",
+                style={"fontSize": "0.82rem", "color": note_color},
+                children=[
+                    html.Span(f"{note_icon} ", className="day-coverage-note-icon"),
+                    html.Span(coverage_note, className="day-coverage-note-text"),
                 ],
             )
         )

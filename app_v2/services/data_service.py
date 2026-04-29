@@ -10,7 +10,7 @@ import logging
 import threading
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date as date_cls, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.database import SessionLocal
@@ -36,6 +36,8 @@ except ImportError:
 
 _PLAUD_WORKFLOW_ACTIVE_STATUSES = {"PENDING", "PROCESSING"}
 _PLAUD_WORKFLOW_TERMINAL_STATUSES = {"SUCCESS", "FAILED", "CANCELLED"}
+_EMPTY_DAY_AUDIT_TTL_SECONDS = 600
+_EMPTY_DAY_AUDIT_MAX_DAYS = 45
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -210,6 +212,8 @@ class DaySummary:
     categories: Dict[str, int] = field(default_factory=dict)
     top_keywords: List[str] = field(default_factory=list)
     ai_summary: Optional[str] = None  # One-line day summary from AI
+    coverage_status: Optional[str] = None  # verified_empty | suspected_gap
+    coverage_note: Optional[str] = None
 
     @property
     def duration_formatted(self) -> str:
@@ -325,6 +329,8 @@ class ChronosDataService:
         self._last_cache_time: Optional[datetime] = None
         self._cache_ttl_seconds = 60  # Refresh cache every minute
         self._cache_lock = threading.Lock()
+        self._plaud_date_audit_cache: Dict[int, Tuple[datetime, frozenset[str]]] = {}
+        self._plaud_date_audit_lock = threading.Lock()
 
         self._init_services()
 
@@ -476,6 +482,134 @@ class ChronosDataService:
                 event.hour_of_day = new_start.hour
 
         return events
+
+    @staticmethod
+    def _parse_plaud_recording_time(value: Optional[str]) -> Optional[datetime]:
+        """Parse Plaud timestamps into naive UTC datetimes."""
+        if not value:
+            return None
+
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+        if parsed.tzinfo is not None:
+            return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
+
+    def _get_recent_plaud_recording_dates(
+        self, days_back: int
+    ) -> Optional[set[str]]:
+        """Return recent Plaud recording dates keyed by actual recording start day.
+
+        This is used to distinguish a genuinely empty day from a probable
+        sync/data-loss gap in the filled timeline. Results are cached so the UI
+        does not hammer Plaud while browsing.
+        """
+        days_back = max(1, min(days_back, _EMPTY_DAY_AUDIT_MAX_DAYS))
+        now = datetime.utcnow()
+        cached = self._plaud_date_audit_cache.get(days_back)
+        if cached and (now - cached[0]).total_seconds() < _EMPTY_DAY_AUDIT_TTL_SECONDS:
+            return set(cached[1])
+
+        with self._plaud_date_audit_lock:
+            now = datetime.utcnow()
+            cached = self._plaud_date_audit_cache.get(days_back)
+            if cached and (now - cached[0]).total_seconds() < _EMPTY_DAY_AUDIT_TTL_SECONDS:
+                return set(cached[1])
+
+            try:
+                from src.plaud_client import PlaudClient
+
+                plaud = PlaudClient()
+                cutoff = now - timedelta(days=days_back)
+                dates: set[str] = set()
+                page = 1
+
+                while True:
+                    page_records = plaud.list_recordings(page=page, page_size=20)
+                    if not page_records:
+                        break
+
+                    older_count = 0
+                    for rec_data in page_records:
+                        record_time = self._parse_plaud_recording_time(
+                            rec_data.get("start_at") or rec_data.get("created_at")
+                        )
+                        if record_time is None:
+                            continue
+                        if record_time < cutoff:
+                            older_count += 1
+                            continue
+                        dates.add(record_time.strftime("%Y-%m-%d"))
+
+                    if older_count > 0 or len(page_records) < 20:
+                        break
+
+                    page += 1
+
+                self._plaud_date_audit_cache[days_back] = (now, frozenset(dates))
+                return dates
+            except Exception as exc:
+                logger.warning(f"Could not audit Plaud coverage for empty days: {exc}")
+                return None
+
+    def _apply_recent_empty_day_audit(
+        self,
+        days: List[DaySummary],
+        *,
+        start_dt: date_cls,
+        end_dt: date_cls,
+        today: Optional[date_cls] = None,
+    ) -> List[DaySummary]:
+        """Annotate recent empty days as verified-empty or suspected gaps."""
+        placeholders = [
+            day for day in days if day.recording_count == 0 and day.event_count == 0
+        ]
+        if not placeholders:
+            return days
+
+        today = today or date_cls.today()
+        recent_window_start = today - timedelta(days=_EMPTY_DAY_AUDIT_MAX_DAYS - 1)
+        audit_start = max(start_dt, recent_window_start)
+        audit_end = min(end_dt, today)
+        if audit_end < audit_start:
+            return days
+
+        plaud_dates = self._get_recent_plaud_recording_dates(
+            (today - audit_start).days + 1
+        )
+        if plaud_dates is None:
+            return days
+
+        audit_start_key = audit_start.strftime("%Y-%m-%d")
+        audit_end_key = audit_end.strftime("%Y-%m-%d")
+        suspected_days: List[str] = []
+
+        for day in placeholders:
+            if day.date < audit_start_key or day.date > audit_end_key:
+                continue
+
+            if day.date in plaud_dates:
+                day.coverage_status = "suspected_gap"
+                day.coverage_note = "Possible sync gap — Plaud shows recordings"
+                suspected_days.append(day.date)
+            else:
+                day.coverage_status = "verified_empty"
+                day.coverage_note = "Verified empty in Plaud"
+
+        if suspected_days and _xlog:
+            sample = ", ".join(suspected_days[:3])
+            extra = "" if len(suspected_days) <= 3 else f" (+{len(suspected_days) - 3} more)"
+            _xlog(
+                "data",
+                "gap-audit",
+                f"Plaud has recordings missing from Chronos on {sample}{extra}",
+                level="warn",
+            )
+
+        return days
 
     def _get_all_events(self, force_refresh: bool = False) -> List[Event]:
         """Get all events from Qdrant with caching."""
@@ -1072,8 +1206,6 @@ class ChronosDataService:
         day_lookup = {d.date: d for d in data_days}
 
         # Determine range
-        from datetime import date as date_cls
-
         if last_n_days:
             end_dt = date_cls.today()
             start_dt = end_dt - timedelta(days=last_n_days - 1)
@@ -1106,7 +1238,11 @@ class ChronosDataService:
                 )
             cursor -= timedelta(days=1)
 
-        return result  # already newest-first
+        return self._apply_recent_empty_day_audit(
+            result,
+            start_dt=start_dt,
+            end_dt=end_dt,
+        )
 
     def get_day_detail(self, date: str) -> Optional[DaySummary]:
         """Get detailed view of a specific day.
