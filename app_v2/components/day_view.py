@@ -821,7 +821,13 @@ def create_heat_map_strip(
 
 def create_day_view(days: List[DaySummary]) -> html.Div:
     """Create the full timeline view with heat-map, date controls, and day cards."""
-    if not days:
+    populated_days = [
+        day
+        for day in days
+        if day.recording_count > 0 or day.event_count > 0 or bool(day.recordings)
+    ]
+
+    if not populated_days:
         return html.Div(
             className="empty-state",
             children=[
@@ -831,9 +837,9 @@ def create_day_view(days: List[DaySummary]) -> html.Div:
             ],
         )
 
-    total_recs = sum(d.recording_count for d in days)
-    total_events = sum(d.event_count for d in days)
-    total_hours = sum(d.total_duration_seconds for d in days) / 3600
+    total_recs = sum(d.recording_count for d in populated_days)
+    total_events = sum(d.event_count for d in populated_days)
+    total_hours = sum(d.total_duration_seconds for d in populated_days) / 3600
 
     return html.Div(
         className="day-view timeline-view",
@@ -861,13 +867,13 @@ def create_day_view(days: List[DaySummary]) -> html.Div:
                                 className="meta-stat",
                             ),
                             html.Span("•", className="meta-sep"),
-                            html.Span(f"{len(days)} days", className="meta-stat"),
+                            html.Span(f"{len(populated_days)} days", className="meta-stat"),
                         ],
                     ),
                 ],
             ),
             # Heat-map strip (30 days at a glance)
-            create_heat_map_strip(days),
+            create_heat_map_strip(populated_days),
             # Date range filter
             html.Div(
                 className="timeline-range-controls",
@@ -894,7 +900,7 @@ def create_day_view(days: List[DaySummary]) -> html.Div:
                 id="days-list",
                 children=[
                     create_day_card(day, expanded=(i == 0))
-                    for i, day in enumerate(days)
+                    for i, day in enumerate(populated_days)
                 ],
             ),
         ],

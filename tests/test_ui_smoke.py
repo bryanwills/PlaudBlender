@@ -8,6 +8,7 @@ import pytest
 import sys
 import os
 import threading
+from datetime import datetime
 from types import SimpleNamespace
 
 # Ensure project root is on path
@@ -114,6 +115,46 @@ class TestDashApp:
         assert calls["count"] == 1
         assert service._qdrant is not None
         assert service._embedder is not None
+
+    def test_timeline_view_hides_empty_day_cards(self):
+        """Timeline cards should only render days that actually have recordings."""
+        from app_v2.components.day_view import create_day_view
+        from app_v2.services.data_service import DaySummary, RecordingSummary
+
+        empty_day = DaySummary(
+            date="2026-04-18",
+            date_display="Saturday, Apr 18",
+            total_duration_seconds=0,
+            recording_count=0,
+            event_count=0,
+        )
+        recording = RecordingSummary(
+            recording_id="rec-001",
+            start_time=datetime(2026, 4, 20, 10, 0, 0),
+            end_time=datetime(2026, 4, 20, 10, 15, 0),
+            duration_seconds=900,
+            event_count=3,
+            categories={"meeting": 3},
+            keywords=["meeting"],
+        )
+        populated_day = DaySummary(
+            date="2026-04-20",
+            date_display="Monday, Apr 20",
+            total_duration_seconds=900,
+            recording_count=1,
+            event_count=3,
+            recordings=[recording],
+            categories={"meeting": 3},
+            top_keywords=["meeting"],
+        )
+
+        view = create_day_view([empty_day, populated_day])
+        children = view.children or []
+        if not isinstance(children, list):
+            children = [children]
+        days_list = children[-1]
+
+        assert len(days_list.children) == 1
 
     def test_embedded_auto_sync_skips_when_systemd_unit_enabled(self, monkeypatch):
         """Dash should not start embedded auto-sync when systemd already owns it."""

@@ -189,6 +189,12 @@ def register_day_view_callbacks(app):
         else:
             xray_log("nav", "filter", f"Showing all time ({len(days)} days)")
 
+        days = [
+            day
+            for day in days
+            if day.recording_count > 0 or day.event_count > 0 or bool(day.recordings)
+        ]
+
         if not days:
             return [
                 html.Div("No recordings in this range", className="empty-state-text")
